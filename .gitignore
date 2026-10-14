@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.browser-profile/
+selectors.local.yaml
+dom-dump.json
+help.png
+.DS_Store

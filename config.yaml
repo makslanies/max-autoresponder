@@ -1,0 +1,35 @@
+# ==== Основные настройки ====
+poll_interval: 4          # секунды между проверками новых сообщений
+headless: false           # false = видимое окно браузера (первый запуск обязателен)
+cooldown_seconds: 120     # минимум между ответами одному и тому же чату
+max_reply_length: 2000    # обрезка ответа LLM
+user_data_dir: .browser-profile   # профиль браузера (сессия не слетает)
+
+# ==== Кому отвечать ====
+# mode: all | whitelist | blacklist
+#   all       — всем входящим
+#   whitelist — только чатам из списка whitelist (точное совпадение имени)
+#   blacklist — всем, кроме чатов из списка blacklist
+reply_to:
+  mode: all
+  whitelist: []
+  blacklist: []
+
+# ==== LLM: Cloudflare Workers AI ====
+# Ключи — в файле .env:
+#   CLOUDFLARE_ACCOUNT_ID=...
+#   CF_AIG_TOKEN=...
+# Список моделей: https://developers.cloudflare.com/workers-ai/models/
+llm:
+  model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast"  # быстрая и недорогая
+  account_id_env: CLOUDFLARE_ACCOUNT_ID
+  api_token_env: CF_AIG_TOKEN
+  temperature: 0.7
+  max_history: 8       # сколько последних сообщений чата отдавать в контекст
+  system_prompt: |
+    Ты — ассистент владельца аккаунта в мессенджере MAX. Ты пишешь от его лица
+    его реальным контактам. Отвечай кратко, дружелюбно и по делу, на языке
+    собеседника, и только на последнее входящее сообщение. Не пересказывай
+    и не резюмируй историю переписки. Если вопрос требует решения владельца —
+    напиши, что он ответит чуть позже. Не выдумывай факты о планах владельца.
+  fallback_reply: ""    # если не пусто — отправляется при ошибке LLM (иначе сообщение пропускается)
