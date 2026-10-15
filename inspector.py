@@ -27,7 +27,7 @@ async def main(mode: str):
             user_data_dir=str(PROFILE),
             headless=False,
             channel="chrome",
-            viewport={"width": 1280, "height": 800},
+            no_viewport=True,   # обычное ресайзабельное окно
         )
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await page.goto("https://web.max.ru/", wait_until="domcontentloaded")

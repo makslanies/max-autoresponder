@@ -68,6 +68,7 @@ class MaxBot:
         self.no_write: set[str] = set()      # каналы и сервисы, куда писать нельзя
         self.defer_until: dict[str, float] = {}
         self.history: dict[str, list[dict]] = {}
+        self.no_titles_ticks = 0     # сколько проходов подряд список чатов без имён
 
     # ---------- утилиты ----------
 
@@ -99,23 +100,47 @@ class MaxBot:
             await asyncio.sleep(1)
         raise RuntimeError("Не удалось обнаружить залогиненный интерфейс")
 
-    async def ensure_chat_list_expanded(self, page: Page):
-        """Узкая колонка аватарок не содержит имён чатов — растягиваем список."""
-        if await page.locator(".aside--compact").count() == 0:
-            return
+    async def chat_list_titles(self, page: Page) -> int:
+        """Имена чатов есть только в развёрнутом списке (в компактном — одна колонка аватарок)."""
+        try:
+            return await page.locator(S.CHAT_TITLE).count()
+        except Exception:
+            return 0
+
+    async def ensure_chat_list_expanded(self, page: Page) -> bool:
+        """Растягивает список чатов, пока в карточках не появятся имена.
+
+        Срабатывает по наличию имён, а не по классу aside: классы меняются
+        между сборками, а без развёрнутого списка бот молча не видит ни имён,
+        ни бейджей непрочитанных.
+        """
+        if await self.chat_list_titles(page) > 0:
+            return True
         splitter = page.locator("button[aria-label='Изменить ширину']")
         box = await splitter.bounding_box() if await splitter.count() else None
         if not box:
-            log.warning("Список чатов свёрнут, разделитель ширины не найден")
-            return
+            log.error("Список чатов свёрнут и не растянуться: "
+                      "кнопка «Изменить ширину» не найдена — бот не увидит чаты")
+            return False
         x = box["x"] + box["width"] / 2
         y = box["y"] + min(80, box["height"] / 2)
+        # окно теперь обычное (размер выбираешь сам) — тянем не фиксированные 320px,
+        # а до ~320px ширины списка, но не шире окна
+        inner_w = await page.evaluate("window.innerWidth") or 1440
+        target_x = min(x + 320, inner_w - 240)
+        if target_x <= x + 40:
+            log.error("Окно слишком узкое (%spx), чтобы развернуть список чатов", inner_w)
+            return False
         await page.mouse.move(x, y)
         await page.mouse.down()
-        await page.mouse.move(x + 320, y, steps=12)
+        await page.mouse.move(target_x, y, steps=12)
         await page.mouse.up()
-        await asyncio.sleep(0.4)
-        log.info("Список чатов развёрнут")
+        await asyncio.sleep(0.6)
+        if await self.chat_list_titles(page) > 0:
+            log.info("Список чатов развёрнут")
+            return True
+        log.error("Список чатов остался свёрнут после перетаскивания — бот не увидит чаты")
+        return False
 
     @staticmethod
     def _norm(text: str) -> str:
@@ -348,29 +373,45 @@ class MaxBot:
                 user_data_dir=str(profile),
                 headless=cfg.get("headless", False),
                 channel="chrome",       # если Chrome не установлен — убери строку
-                viewport={"width": 1440, "height": 900},
+                # viewport не задаём — окно обычное, размер можно менять руками
+                no_viewport=True,
             )
             page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             await page.goto("https://web.max.ru/", wait_until="domcontentloaded")
             log.info("Жду входа в аккаунт (при необходимости залогинься)...")
             await self.ensure_logged_in(page)
-            await self.ensure_chat_list_expanded(page)
             await page.locator(S.CHAT_ITEM).first.wait_for(timeout=15000)
-            log.info("Залогинен. Бот работает. Ctrl+C — остановить.")
+            await self.ensure_chat_list_expanded(page)
+            n_items = await page.locator(S.CHAT_ITEM).count()
+            n_titles = await self.chat_list_titles(page)
+            if n_titles == 0:
+                log.error("Имена чатов не найдены: список остался свёрнут — "
+                          "входящие обнаружить не удастся")
+            log.info("Залогинен. Чатов в списке: %d (с именами: %d). Бот работает. Ctrl+C — остановить.",
+                     n_items, n_titles)
 
             try:
                 while True:
                     try:
-                        # Сначала уже открытый диалог: новое сообщение там без бейджа.
-                        if not await self.answer_open_chat(page):
-                            for chat in await self.collect_unread_chats(page):
-                                if not chat["unread"]:
-                                    continue
-                                fp = self._hash(chat["title"], chat["preview"], chat["badge"])
-                                if fp in self.caught_up or chat["title"] in self.no_write:
-                                    continue
-                                await self.process_chat(page, chat)
-                                break  # один чат за проход, список после клика меняется
+                        if await self.chat_list_titles(page) == 0:
+                            # список свёрнут — ни имён, ни бейджей непрочитанных не видно
+                            self.no_titles_ticks += 1
+                            if self.no_titles_ticks % 15 == 1:  # раз в ~минуту
+                                log.error("Список чатов без имён (свёрнут) — входящие не видны. "
+                                          "Пробую развернуть снова...")
+                                await self.ensure_chat_list_expanded(page)
+                        else:
+                            self.no_titles_ticks = 0
+                            # Сначала уже открытый диалог: новое сообщение там без бейджа.
+                            if not await self.answer_open_chat(page):
+                                for chat in await self.collect_unread_chats(page):
+                                    if not chat["unread"]:
+                                        continue
+                                    fp = self._hash(chat["title"], chat["preview"], chat["badge"])
+                                    if fp in self.caught_up or chat["title"] in self.no_write:
+                                        continue
+                                    await self.process_chat(page, chat)
+                                    break  # один чат за проход, список после клика меняется
                     except Exception as e:
                         log.warning("Ошибка итерации: %s", e)
                     await asyncio.sleep(cfg.get("poll_interval", 4))
